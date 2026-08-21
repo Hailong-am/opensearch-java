@@ -8,6 +8,8 @@
 
 package org.opensearch.client.opensearch.aws;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.Objects;
 import java.util.function.Function;
 import java.util.regex.Matcher;
@@ -40,11 +42,17 @@ import software.amazon.awssdk.regions.Region;
  * <h3>2. Builder style (full control)</h3>
  *
  * <pre>{@code
- * // Consistent with the rest of opensearch-java (SearchRequest.of(), etc.)
+ * // SigV4 with custom credentials
  * OpenSearchClient client = AwsOpenSearchClient.of(b -> b
  *     .endpoint("https://my-domain.us-east-1.es.amazonaws.com")
  *     .credentials(myProvider)           // optional -- defaults to DefaultCredentialsProvider
  *     .httpClient(myHttpClient)          // optional -- defaults to AwsCrtHttpClient
+ * );
+ *
+ * // Basic auth (AOS fine-grained access control)
+ * OpenSearchClient client = AwsOpenSearchClient.of(b -> b
+ *     .endpoint("https://my-domain.us-east-1.es.amazonaws.com")
+ *     .basicAuth("admin", "myPassword")
  * );
  *
  * AossOpenSearchClient aoss = AwsOpenSearchClient.ofAoss(b -> b
@@ -134,6 +142,7 @@ public final class AwsOpenSearchClient {
         @Nullable private String endpoint;
         @Nullable private AwsCredentialsProvider credentials;
         @Nullable private SdkHttpClient httpClient;
+        @Nullable private String basicAuthHeader;
 
         private Builder() {}
 
@@ -148,12 +157,34 @@ public final class AwsOpenSearchClient {
         }
 
         /**
-         * Optional. AWS credentials provider.
+         * Optional. AWS credentials provider for SigV4 signing.
          * Defaults to {@link DefaultCredentialsProvider} (env vars, instance profile, etc.)
+         * Mutually exclusive with {@link #basicAuth}.
          */
         @Nonnull
         public Builder credentials(@Nonnull AwsCredentialsProvider credentials) {
             this.credentials = Objects.requireNonNull(credentials, "credentials");
+            return this;
+        }
+
+        /**
+         * Optional. Use HTTP Basic authentication instead of SigV4.
+         *
+         * <p>AOS supports basic auth via fine-grained access control (internal user database).
+         * When set, SigV4 signing is disabled -- the {@link #credentials} setting is ignored.
+         *
+         * <p>AOSS does not support basic auth -- use SigV4 (the default) instead.
+         *
+         * @param username OpenSearch username
+         * @param password OpenSearch password
+         */
+        @Nonnull
+        public Builder basicAuth(@Nonnull String username, @Nonnull String password) {
+            Objects.requireNonNull(username, "username");
+            Objects.requireNonNull(password, "password");
+            String raw = username + ":" + password;
+            this.basicAuthHeader = "Basic "
+                + Base64.getEncoder().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
             return this;
         }
 
@@ -184,6 +215,11 @@ public final class AwsOpenSearchClient {
                         + endpoint
                 );
             }
+            if (basicAuthHeader != null) {
+                throw new IllegalArgumentException(
+                    "AOSS does not support basic auth. Use SigV4 (the default) instead."
+                );
+            }
             return new AossOpenSearchClient(buildTransport());
         }
 
@@ -193,17 +229,25 @@ public final class AwsOpenSearchClient {
             SdkHttpClient http = httpClient != null
                 ? httpClient
                 : AwsCrtHttpClient.builder().build();
-            AwsCredentialsProvider creds = credentials != null
-                ? credentials
-                : DefaultCredentialsProvider.create();
+
+            AwsSdk2TransportOptions.Builder optBuilder = AwsSdk2TransportOptions.builder();
+
+            if (basicAuthHeader != null) {
+                // Basic auth: inject Authorization header, do not set SigV4 credentials
+                optBuilder.addHeader("Authorization", basicAuthHeader);
+            } else {
+                // SigV4: use provided credentials or fall back to DefaultCredentialsProvider
+                optBuilder.setCredentials(credentials != null
+                    ? credentials
+                    : DefaultCredentialsProvider.create());
+            }
+
             return new AwsSdk2Transport(
                 http,
                 host,
                 info.service,
                 Region.of(info.region),
-                AwsSdk2TransportOptions.builder()
-                    .setCredentials(creds)
-                    .build()
+                optBuilder.build()
             );
         }
 
@@ -244,7 +288,17 @@ public final class AwsOpenSearchClient {
             return this;
         }
 
-        /** Builds the {@link AossOpenSearchClient}. Validates the endpoint is an AOSS URL. */
+        /**
+         * Not supported for AOSS. Calling {@link #build()} after this will throw
+         * {@link IllegalArgumentException} with a clear message.
+         * AOSS requires SigV4 -- use {@link #credentials} instead.
+         */
+        @Nonnull
+        public AossBuilder basicAuth(@Nonnull String username, @Nonnull String password) {
+            inner.basicAuth(username, password);
+            return this;
+        }
+
         @Override
         @Nonnull
         public AossOpenSearchClient build() {

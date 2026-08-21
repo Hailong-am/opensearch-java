@@ -129,4 +129,30 @@ public class AwsOpenSearchClientTest {
         // Escape hatch must be present
         assertNotNull(aoss.asOpenSearchClient());
     }
+
+    // ---- Basic auth -----------------------------------------------------
+
+    @Test
+    public void basicAuthBuildsSuccessfully() {
+        // Basic auth is valid for AOS (fine-grained access control)
+        org.opensearch.client.opensearch.OpenSearchClient client =
+            AwsOpenSearchClient.of(b -> b
+                .endpoint("https://my-domain.us-east-1.es.amazonaws.com")
+                .basicAuth("admin", "myPassword"));
+        assertNotNull(client);
+    }
+
+    @Test
+    public void basicAuthAndAossThrows() {
+        // AOSS does not support basic auth -- must fail with a clear message
+        try {
+            AwsOpenSearchClient.ofAoss(b -> b
+                .endpoint("https://abc123.us-east-1.aoss.amazonaws.com")
+                .basicAuth("admin", "password"));
+            fail("Expected IllegalArgumentException");
+        } catch (IllegalArgumentException e) {
+            assertTrue("message should mention AOSS and basic auth",
+                e.getMessage().contains("AOSS") && e.getMessage().contains("basic auth"));
+        }
+    }
 }
